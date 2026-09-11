@@ -32,12 +32,53 @@ python mfi_study.py --databento NQ=NQ ES=ES GC=GC \
 aggregated to 4h. For an explicit contract use `LABEL=DATASET:SYMBOL:STYPE`,
 e.g. `NQ=GLBX.MDP3:NQZ5:raw_symbol`.
 
-From exported CSVs instead (TradingView, NinjaTrader, Barchart, IBKR — column
-names and timestamp formats are auto-detected, epoch or ISO):
+### From TradingView exports
+
+Set the chart up before exporting — these three settings decide whether the
+numbers mean anything:
+
+1. **Symbol:** `CME_MINI:NQ1!`, `CME_MINI:ES1!`, `COMEX:GC1!` (front-month
+   continuous).
+2. **Interval: 4h**, and set the session to **extended hours (ETH)**. RTH-only
+   changes the volume, and MFI is volume-weighted, so an RTH chart produces a
+   different indicator.
+3. **Add two studies to the chart: `Volume` and `Money Flow Index` (length 14).**
+   TradingView only exports indicators that are on the chart. Volume is
+   required — MFI cannot be computed without it. The MFI column is optional but
+   worth adding: the tool cross-checks its own MFI against it (see below).
+
+Then `⋯` menu (top right of the chart) → **Export chart data…** → time format
+ISO, and run:
+
+```bash
+python mfi_study.py --csv NQ=nq_4h.csv ES=es_4h.csv GC=gc_4h.csv \
+                    --no-resample --outdir out
+```
+
+`--no-resample` matters: the bars are already 4h and already anchored the way
+TradingView anchors them, so re-bucketing them would be wrong.
+
+**The cross-check.** If the export contains an MFI column, the tool compares it
+against its own calculation and prints one of:
+
+```
+[NQ] MFI cross-check vs exported column: MATCH  (n=2886, max diff 0.0001, ...)
+[NQ] MFI cross-check vs exported column: MISMATCH (n=2880, max diff 57.50, ...)
+```
+
+`MATCH` means this tool and your chart agree bar for bar, so the signals it
+finds are the ones you would see on screen. `MISMATCH` means they are not
+computing the same thing — wrong MFI length, RTH instead of ETH, or bars that
+got resampled when they should not have been.
+
+### From other vendors
+
+Column names and timestamp formats are auto-detected (epoch seconds/millis/
+micros/nanos, or ISO with or without an offset) for NinjaTrader, Barchart,
+IBKR, Databento and similar:
 
 ```bash
 python mfi_study.py --csv NQ=nq_1h.csv ES=es_1h.csv GC=gc_1h.csv --outdir out
-python mfi_study.py --csv NQ=nq_4h.csv --no-resample --outdir out   # already 4h
 ```
 
 ## The one decision you should make consciously

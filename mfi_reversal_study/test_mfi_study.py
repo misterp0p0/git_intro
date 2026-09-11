@@ -8,6 +8,9 @@ import pandas as pd
 
 from mfi_study import (
     money_flow_index,
+    compare_mfi,
+    format_mfi_check,
+    load_csv,
     summarise,
     report,
     find_signals,
@@ -354,6 +357,49 @@ def test_report_renders():
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     check("full report renders", ok, detail)
+
+
+def test_mfi_cross_check():
+    idx = pd.date_range("2024-01-02 18:00", periods=50, freq="4h", tz="America/New_York")
+    a = pd.Series(np.linspace(5, 95, 50), index=idx)
+
+    same = compare_mfi(a, a.copy())
+    check("identical series -> zero diff", same["max_abs_diff"] == 0)
+    check("identical series -> MATCH", "MATCH" in format_mfi_check("NQ", same))
+
+    off = compare_mfi(a, a + 0.005)
+    check("float noise still MATCH", "MATCH" in format_mfi_check("NQ", off))
+
+    bad = compare_mfi(a, a + 20.0)
+    check("large divergence -> MISMATCH", "MISMATCH" in format_mfi_check("NQ", bad))
+    check("MISMATCH explains what to check",
+          "length is 14" in format_mfi_check("NQ", bad))
+
+    nan = compare_mfi(a, pd.Series([np.nan] * 50, index=idx))
+    check("no overlap handled", nan["compared"] == 0)
+    check("no overlap message", "no overlapping" in format_mfi_check("NQ", nan))
+
+
+def test_tradingview_export_shape(tmpdir="."):
+    """A TradingView-shaped CSV must parse: ISO+offset time, mixed-case headers."""
+    import os
+    path = os.path.join(tmpdir, "_tv_probe.csv")
+    idx = pd.date_range("2024-01-02 18:00", periods=30, freq="4h", tz="America/New_York")
+    pd.DataFrame({
+        "time": [t.isoformat() for t in idx],
+        "open": np.arange(30.0) + 100, "high": np.arange(30.0) + 102,
+        "low": np.arange(30.0) + 99, "close": np.arange(30.0) + 101,
+        "Volume": np.full(30, 1000.0),
+        "MFI": np.linspace(10, 90, 30),
+    }).to_csv(path, index=False)
+    try:
+        df = load_csv(path, "America/New_York")
+        check("TradingView headers parsed", set(["open", "high", "low", "close", "volume"]) <= set(df.columns))
+        check("exported MFI column carried through", "mfi_ref" in df.columns)
+        check("ISO+offset timestamps localised", str(df.index.tz) == "America/New_York")
+        check("row count preserved", len(df) == 30, f"got {len(df)}")
+    finally:
+        os.remove(path)
 
 
 def test_stop_survival_monotonic():

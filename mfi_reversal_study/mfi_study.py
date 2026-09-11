@@ -126,6 +126,16 @@ _COL_ALIASES = {
     "volume": {"volume", "vol", "v", "totalvolume", "size"},
 }
 
+# TradingView names an exported indicator after the study and its inputs,
+# e.g. "MFI" or "Money Flow Index" or "MFI 14". Match loosely.
+def _find_reference_mfi(df: pd.DataFrame):
+    for col in df.columns:
+        low = str(col).strip().lower()
+        if low.startswith("mfi") or low.startswith("money flow"):
+            return col
+    return None
+
+
 _TIME_ALIASES = ["datetime", "date_time", "timestamp", "time", "date", "bar_time", "ts_event"]
 
 
@@ -142,6 +152,10 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
                 f"CSV is missing a '{canon}' column. Found: {list(df.columns)}"
             )
         out[canon] = df[hit]
+    ref = _find_reference_mfi(df)
+    if ref is not None:
+        out["mfi_ref"] = df[ref]
+
     res = pd.DataFrame(out, index=df.index)
     if "volume" not in res.columns:
         raise SystemExit(
@@ -473,6 +487,52 @@ def measure_events(
     return pd.DataFrame([asdict(r) for r in rows])
 
 
+def compare_mfi(computed: pd.Series, reference: pd.Series) -> dict:
+    """Cross-check our MFI against one exported from a charting platform.
+
+    Any disagreement beyond floating-point noise means the two are not looking
+    at the same thing -- usually a different MFI length, a different session
+    setting (RTH vs ETH changes the volume), or bars anchored differently.
+    """
+    both = computed.notna() & reference.notna()
+    n = int(both.sum())
+    if n == 0:
+        return {"compared": 0}
+    diff = (computed[both] - reference[both]).abs()
+    return {
+        "compared": n,
+        "max_abs_diff": float(diff.max()),
+        "mean_abs_diff": float(diff.mean()),
+        "pct_within_0_01": float(100.0 * (diff <= 0.01).mean()),
+        "pct_within_0_5": float(100.0 * (diff <= 0.5).mean()),
+        "correlation": float(computed[both].corr(reference[both])),
+    }
+
+
+def format_mfi_check(label: str, res: dict) -> str:
+    if res.get("compared", 0) == 0:
+        return f"[{label}] no overlapping MFI values to compare."
+    verdict = (
+        "MATCH" if res["max_abs_diff"] <= 0.01
+        else "CLOSE" if res["pct_within_0_5"] >= 99.0
+        else "MISMATCH"
+    )
+    msg = (
+        f"[{label}] MFI cross-check vs exported column: {verdict}  "
+        f"(n={res['compared']}, max diff {res['max_abs_diff']:.4f}, "
+        f"mean diff {res['mean_abs_diff']:.4f}, "
+        f"{res['pct_within_0_01']:.1f}% within 0.01)"
+    )
+    if verdict == "MISMATCH":
+        msg += (
+            "\n    The two are not computing the same thing. Check that the "
+            "chart's MFI length is 14,\n    that the chart session is ETH "
+            "(RTH changes the volume), and that you exported 4h bars\n"
+            "    and passed --no-resample."
+        )
+    return msg
+
+
 # --------------------------------------------------------------------------
 # Reporting
 # --------------------------------------------------------------------------
@@ -576,6 +636,10 @@ def report(all_events: dict[str, pd.DataFrame], args) -> str:
         f"threshold={args.threshold}  re-arm above={args.rearm}  "
         f"reference={args.reference}  recovery={args.recovery}  tz={args.tz}"
     )
+    if getattr(args, "mfi_checks", None):
+        out.append("")
+        for line in args.mfi_checks:
+            out.append(line)
     out.append("")
     out.append("Measured: points from the reference price down to the lowest low")
     out.append("printed before the first bar trading back up through that price.")
@@ -749,6 +813,7 @@ def main(argv=None) -> int:
 
     os.makedirs(args.outdir, exist_ok=True)
     all_events: dict[str, pd.DataFrame] = {}
+    mfi_checks: list[str] = []
 
     for label, raw in sources.items():
         bars = raw if args.no_resample else resample_bars(
@@ -763,6 +828,13 @@ def main(argv=None) -> int:
             )
 
         mfi = money_flow_index(bars, args.mfi_length)
+
+        if "mfi_ref" in bars.columns:
+            check = compare_mfi(mfi, bars["mfi_ref"])
+            mfi_checks.append(format_mfi_check(label, check))
+            print(mfi_checks[-1], file=sys.stderr)
+        elif not args.no_resample:
+            pass
         events = measure_events(
             bars, mfi, label,
             threshold=args.threshold,
@@ -781,6 +853,7 @@ def main(argv=None) -> int:
         events.to_csv(os.path.join(args.outdir, f"{label}_events.csv"), index=False)
         bars.assign(mfi=mfi).to_csv(os.path.join(args.outdir, f"{label}_bars.csv"))
 
+    args.mfi_checks = mfi_checks
     text = report(all_events, args)
     print(text)
     with open(os.path.join(args.outdir, "report.txt"), "w") as fh:
